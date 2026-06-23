@@ -77,6 +77,13 @@ def safe_json(client, url):
     r = client.get(url)
     if r.status_code == 204 or not r.content:
         return {}
+    if r.status_code in (401, 403):
+        sys.exit(
+            f"Auth failed ({r.status_code}) fetching {url.split('?')[0]} — "
+            "session cookie may have expired. Re-export from browser."
+        )
+    if r.status_code >= 400:
+        print(f"  [warn] HTTP {r.status_code} on {url.split('/')[-2:]}: {r.text[:120]}")
     try:
         return r.json()
     except Exception as e:
@@ -84,7 +91,10 @@ def safe_json(client, url):
 
 
 def safe_filename(name):
-    return name.replace("/", "_").replace("\\", "_").strip() or "untitled"
+    name = name.replace("/", "_").replace("\\", "_").strip()
+    if name in (".", ".."):
+        name = "_"
+    return name or "untitled"
 
 
 def count_nodes(node):
@@ -230,6 +240,7 @@ def fetch_timelogs(client, base_url, portal_id, project_id, out_dir, start, end)
         return r.json().get("timelogs", {}).get("date", [])
 
     all_entries = []
+    page_size = 200
     for component in ["task", "bug", "general"]:
         log_key = {"task": "tasklogs", "bug": "buglogs", "general": "generallogs"}[component]
         index = 1
@@ -238,7 +249,7 @@ def fetch_timelogs(client, base_url, portal_id, project_id, out_dir, start, end)
             date_groups = fetch_page(component, index)
             if not date_groups:
                 break
-            batch_count = 0
+            page_entries = 0
             for dg in date_groups:
                 for entry in dg.get(log_key, []):
                     task_info = entry.get("task", entry.get("bug", {}))
@@ -258,11 +269,11 @@ def fetch_timelogs(client, base_url, portal_id, project_id, out_dir, start, end)
                         "start_time": entry.get("start_time", ""),
                         "end_time": entry.get("end_time", ""),
                     })
-                    batch_count += 1
-            count += batch_count
-            if batch_count < 200:
+                    page_entries += 1
+            count += page_entries
+            if page_entries < page_size:
                 break
-            index += batch_count
+            index += page_size
             time.sleep(0.15)
         print(f"  [{component}] {count} entries")
 
@@ -338,81 +349,82 @@ def fetch_documents(client, base_url, portal_id, project_id, out_dir, cookies):
     folders = r.json().get("documents", {}).get("folders", [])
     print(f"[+] {len(folders)} top-level folder(s)")
 
-    wd = httpx.Client(
+    with httpx.Client(
         cookies=cookies, headers=WD_HEADERS, timeout=120, follow_redirects=True
-    )
+    ) as wd:
 
-    def list_children(wd_id):
-        items, off = [], 0
-        while True:
-            rr = wd.get(
-                f"https://workdrive.zoho.com/api/v1/files/{wd_id}/files",
-                params={"page[limit]": 50, "page[offset]": off},
-            )
-            if rr.status_code != 200:
-                print(f"    ! list failed {rr.status_code} for {wd_id}: {rr.text[:120]}")
-                break
-            data = rr.json().get("data", [])
-            items += data
-            if len(data) < 50:
-                break
-            off += 50
-            time.sleep(0.1)
-        return items
+        def list_children(wd_id):
+            items, off = [], 0
+            while True:
+                rr = wd.get(
+                    f"https://workdrive.zoho.com/api/v1/files/{wd_id}/files",
+                    params={"page[limit]": 50, "page[offset]": off},
+                )
+                if rr.status_code != 200:
+                    print(f"    ! list failed {rr.status_code} for {wd_id}: {rr.text[:120]}")
+                    break
+                data = rr.json().get("data", [])
+                items += data
+                if len(data) < 50:
+                    break
+                off += 50
+                time.sleep(0.1)
+            return items
 
-    def walk(wd_id, relpath):
-        for it in list_children(wd_id):
-            a = it.get("attributes", {})
-            name = a.get("name", it.get("id"))
-            cid = it.get("id")
-            if a.get("is_folder"):
-                walk(cid, relpath + [safe_filename(name)])
+        def walk(wd_id, relpath):
+            for it in list_children(wd_id):
+                a = it.get("attributes", {})
+                name = a.get("name", it.get("id"))
+                cid = it.get("id")
+                if a.get("is_folder"):
+                    walk(cid, relpath + [safe_filename(name)])
+                    continue
+                extn = a.get("extn", "") or ""
+                si = a.get("storage_info", {}) or {}
+                size = si.get("size_in_bytes") or si.get("size") or 0
+                destdir = docs_out.joinpath(*relpath)
+                destdir.mkdir(parents=True, exist_ok=True)
+                fname = safe_filename(name)
+                if extn and not fname.lower().endswith("." + extn.lower()):
+                    fname = f"{fname}.{extn}"
+                dest = destdir / fname
+                if not dest.resolve().is_relative_to(docs_out.resolve()):
+                    print(f"    [skip] {name} — path escapes output directory")
+                    continue
+                rec = {
+                    "id": cid, "name": name, "extn": extn, "size": size,
+                    "path": str(dest.relative_to(docs_out)),
+                    "modified": a.get("modified_time_i18") or a.get("modified_time", ""),
+                }
+                try:
+                    dl = wd.get(f"https://workdrive.zoho.com/api/v1/download/{cid}")
+                    ctype = dl.headers.get("content-type", "")
+                    if (
+                        dl.status_code == 200
+                        and dl.content
+                        and "vnd.api+json" not in ctype
+                    ):
+                        dest.write_bytes(dl.content)
+                        rec["status"] = "ok"
+                        rec["bytes"] = len(dl.content)
+                        print(f"    [ok]   {'/'.join(relpath)}/{fname}  ({len(dl.content)} B)")
+                    else:
+                        rec["status"] = f"skip ({dl.status_code}, {ctype[:30]})"
+                        print(f"    [skip] {'/'.join(relpath)}/{name}  -> {rec['status']}")
+                except Exception as e:
+                    rec["status"] = f"error: {e}"
+                    print(f"    [err]  {name}: {e}")
+                manifest.append(rec)
+                time.sleep(0.15)
+
+        for f in folders:
+            fname = f.get("name", "folder")
+            wd_id = f.get("workdrive_folder_id")
+            if not wd_id:
+                print(f"  -> folder: {fname} (no WorkDrive id, skipping)")
                 continue
-            extn = a.get("extn", "") or ""
-            si = a.get("storage_info", {}) or {}
-            size = si.get("size_in_bytes") or si.get("size") or 0
-            destdir = docs_out.joinpath(*relpath)
-            destdir.mkdir(parents=True, exist_ok=True)
-            fname = safe_filename(name)
-            if extn and not fname.lower().endswith("." + extn.lower()):
-                fname = f"{fname}.{extn}"
-            dest = destdir / fname
-            rec = {
-                "id": cid, "name": name, "extn": extn, "size": size,
-                "path": str(dest.relative_to(docs_out)),
-                "modified": a.get("modified_time_i18") or a.get("modified_time", ""),
-            }
-            try:
-                dl = wd.get(f"https://workdrive.zoho.com/api/v1/download/{cid}")
-                ctype = dl.headers.get("content-type", "")
-                if (
-                    dl.status_code == 200
-                    and dl.content
-                    and "vnd.api+json" not in ctype
-                ):
-                    dest.write_bytes(dl.content)
-                    rec["status"] = "ok"
-                    rec["bytes"] = len(dl.content)
-                    print(f"    [ok]   {'/'.join(relpath)}/{fname}  ({len(dl.content)} B)")
-                else:
-                    rec["status"] = f"skip ({dl.status_code}, {ctype[:30]})"
-                    print(f"    [skip] {'/'.join(relpath)}/{name}  -> {rec['status']}")
-            except Exception as e:
-                rec["status"] = f"error: {e}"
-                print(f"    [err]  {name}: {e}")
-            manifest.append(rec)
-            time.sleep(0.15)
-
-    for f in folders:
-        fname = f.get("name", "folder")
-        wd_id = f.get("workdrive_folder_id")
-        if not wd_id:
-            print(f"  -> folder: {fname} (no WorkDrive id, skipping)")
-            continue
-        print(f"  -> folder: {fname}")
-        walk(wd_id, [safe_filename(fname)])
-
-    wd.close()
+            print(f"  -> folder: {fname}")
+            walk(wd_id, [safe_filename(fname)])
     (docs_out / "_manifest.json").write_text(json.dumps(manifest, indent=2))
     write_documents_markdown(manifest, docs_out)
     ok = sum(1 for m in manifest if m.get("status") == "ok")
@@ -467,8 +479,8 @@ def main():
     )
     ap.add_argument("--out", default=".", help="Output directory (default: current)")
     ap.add_argument(
-        "--portal-slug", default="fwrd",
-        help="Portal URL slug (default: fwrd)",
+        "--portal-slug", required=True,
+        help="Portal URL slug (the name in projects.zoho.com/portal/<slug>)",
     )
     ap.add_argument(
         "--base-url", default="https://projects.zoho.com",

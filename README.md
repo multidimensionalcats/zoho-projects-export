@@ -32,30 +32,34 @@ at which point you'll need to re-export.
 ```bash
 # Pull all tasks (with subtasks, comments, custom fields)
 python zoho_projects_export.py scrape \
-    --portal-id 21453673 \
-    --project-id 479538000024299177 \
+    --portal-id YOUR_PORTAL_ID \
+    --project-id YOUR_PROJECT_ID \
+    --portal-slug YOUR_PORTAL_SLUG \
     --cookies cookies.txt \
     --out ./export
 
 # Pull time logs (defaults to last 150 days)
 python zoho_projects_export.py timelogs \
-    --portal-id 21453673 \
-    --project-id 479538000024299177 \
+    --portal-id YOUR_PORTAL_ID \
+    --project-id YOUR_PROJECT_ID \
+    --portal-slug YOUR_PORTAL_SLUG \
     --cookies cookies.txt \
     --out ./export
 
 # Pull time logs for a specific date range
 python zoho_projects_export.py timelogs \
-    --portal-id 21453673 \
-    --project-id 479538000024299177 \
+    --portal-id YOUR_PORTAL_ID \
+    --project-id YOUR_PROJECT_ID \
+    --portal-slug YOUR_PORTAL_SLUG \
     --cookies cookies.txt \
     --out ./export \
     --start 01-01-2026 --end 06-01-2026
 
 # Pull WorkDrive-backed project documents
 python zoho_projects_export.py documents \
-    --portal-id 21453673 \
-    --project-id 479538000024299177 \
+    --portal-id YOUR_PORTAL_ID \
+    --project-id YOUR_PROJECT_ID \
+    --portal-slug YOUR_PORTAL_SLUG \
     --cookies cookies.txt \
     --out ./export
 ```
@@ -69,7 +73,7 @@ python zoho_projects_export.py documents \
 | `--project-id` | yes | Zoho project ID string |
 | `--cookies` | yes | Path to cookie file |
 | `--out` | no | Output directory (default: `.`) |
-| `--portal-slug` | no | Portal URL slug (default: `fwrd`) |
+| `--portal-slug` | yes | Portal URL slug (from `projects.zoho.com/portal/<slug>`) |
 | `--base-url` | no | Zoho Projects base URL (default: `https://projects.zoho.com`) |
 | `--start` | no | Timelog start date, MM-DD-YYYY |
 | `--end` | no | Timelog end date, MM-DD-YYYY |

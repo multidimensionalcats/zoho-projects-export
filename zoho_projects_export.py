@@ -172,7 +172,7 @@ def write_tasks_markdown(tree, out_dir):
             lines.append("- fields: " + " | ".join(f"{k}: {v}" for k, v in cfs))
         desc = (d.get("description") or t.get("description") or "").strip()
         if desc:
-            lines += ["", desc, ""]
+            lines.extend(["", desc, ""])
         comments = (node["comments"] or {}).get("comments", []) or []
         if comments:
             lines.append(f"**{len(comments)} comment(s):**")
